@@ -2,18 +2,19 @@
 // rules forward from a fresh world, steered by a small autopilot that walks toward
 // waypoints while refusing any step a guard could see, so the frame is what a real
 // game looks like and the same seed always gives the same frame.
-import { STEP } from './config.js';
+import { CAMERA, STEP } from './config.js';
 import { EVENT_CAUGHT, SCREEN_LEVEL_DONE, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN, stepWorld } from './world.js';
-import { canSee } from './guard.js';
+import { canSee, canSeeFrom } from './guard.js';
 
 const DIRS = [
   [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1],
 ];
 
-/** Would any guard see the thief at (x, y) right now? */
+/** Would any guard or camera see the thief at (x, y) right now? */
 function wouldBeSeen(state, x, y) {
   const probe = { x, y, sneaking: true, hiddenInPlant: false };
-  return state.guards.some((g) => canSee(g, probe, state.level, state.time));
+  if (state.guards.some((g) => canSee(g, probe, state.level, state.time, state.smokes))) return true;
+  return state.cameras.some((c) => canSeeFrom(c.x, c.y, c.dir, c.range, CAMERA.viewHalfAngle, probe, state.level, state.smokes));
 }
 
 /** One autopilot step: move toward the waypoint, never into a visible spot. */
@@ -65,15 +66,16 @@ function walkPath(world, waypoints, maxSeconds, sneaking) {
 
 /**
  * Set `world` to the named scene and return the screen to draw over it.
- * start: title over gallery 1 with the wardens mid-patrol. play: gallery 2,
- * one relic stolen, the thief sneaking along the bottom corridor. alert:
- * gallery 3 mid-chase, cones red, the thief fleeing south. end: the win screen.
+ * start: title over heist 1 with the wardens mid-patrol. play: heist 4 (the
+ * casino), one relic stolen, the thief sneaking along the bottom corridor
+ * under the cameras. alert: heist 5 mid-chase, cones red, the thief fleeing
+ * south past the lasers. end: the win screen.
  */
 export function stageShot(name, world) {
   const { state } = world;
   world.reset();
   if (name === 'play') {
-    walkPath(world, [[90, 640], [200, 560], [420, 640], [720, 600]], 60, true);
+    walkPath(world, [[90, 640], [200, 600], [420, 640], [720, 600], [1000, 600], [1120, 560]], 90, true);
     state.player.sneaking = true;
     return { screen: SCREEN_PLAY, best: 0 };
   }
@@ -93,11 +95,12 @@ export function stageShot(name, world) {
   if (name === 'end') {
     for (const relic of state.relics) relic.taken = true;
     state.collected = state.relics.length;
-    state.score = 4850;
-    state.best = 4850;
+    state.score = 5450;
+    state.lootValue = 400;
+    state.best = 5450;
     state.player.x = state.level.exit.x + 32;
     state.player.y = state.level.exit.y + 32;
-    return { screen: SCREEN_WIN, best: 4850 };
+    return { screen: SCREEN_WIN, best: 5450 };
   }
   // start (default): let the first gallery's wardens patrol for a while.
   for (let i = 0; i < 5 / STEP; i += 1) {

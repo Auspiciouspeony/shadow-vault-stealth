@@ -5,18 +5,22 @@
 // ?seed=N fixes the guard patrols. ?shot=start|play|alert|end (with &seed=N)
 // stages that scene instead of running the loop, paints it twice and sets
 // window.__shotReady for a screenshot.
-import { BEST_KEY, LEVELS, STEP } from './config.js';
+import { BEST_KEY, LEVELS, MAX_STRIKES, STEP } from './config.js';
 import { createRandom } from './random.js';
 import {
   EVENT_ALARM,
   EVENT_CAUGHT,
   EVENT_COIN,
+  EVENT_LASER,
   EVENT_LEVEL_CLEAR,
+  EVENT_LOOT,
   EVENT_NOISE,
   EVENT_PICKUP,
+  EVENT_SMOKE,
   EVENT_SPOTTED,
   SCREEN_BRIEF,
   SCREEN_CAUGHT,
+  SCREEN_FAILED,
   SCREEN_LEVEL_DONE,
   SCREEN_PAUSED,
   SCREEN_PLAY,
@@ -25,14 +29,15 @@ import {
   createWorld,
   stepWorld,
   throwCoin,
+  throwSmoke,
 } from './world.js';
-import { ACTION_CONFIRM, ACTION_MUTE, ACTION_PAUSE, ACTION_RESTART, createInput } from './input.js';
+import { ACTION_CONFIRM, ACTION_MUTE, ACTION_PAUSE, ACTION_RESTART, ACTION_SMOKE, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { createRenderer } from './render.js';
 import { stageShot } from './shots.js';
 
 const MAX_FRAME = 0.25;
-const SHOT_LEVEL = { start: 0, play: 1, alert: 2, end: 2 };
+const SHOT_LEVEL = { start: 0, play: 3, alert: 4, end: 4 };
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
@@ -88,6 +93,7 @@ function runGame() {
   let world = makeWorld(0);
   let screen = SCREEN_TITLE;
   let best = readBest();
+  let strikes = MAX_STRIKES;
   let accumulator = 0;
   let last = performance.now();
   let lastStepX = 0;
@@ -98,9 +104,11 @@ function runGame() {
     status.textContent = message;
   }
 
-  function startLevel(levelIndex) {
+  function startLevel(levelIndex, fresh = false) {
+    if (fresh) strikes = MAX_STRIKES;
     world = makeWorld(levelIndex);
     world.state.best = best;
+    world.state.strikes = strikes;
     screen = SCREEN_BRIEF;
     announce(`${LEVELS[levelIndex].name}. Steal every relic, then reach the exit.`);
   }
@@ -129,13 +137,31 @@ function runGame() {
       state.message = 'They heard that...';
       state.messageTime = state.time;
     }
+    if (events & EVENT_LASER) {
+      audio.laser();
+      state.message = 'Laser tripped! The wardens are coming!';
+      state.messageTime = state.time;
+      announce('Laser tripped! The wardens are coming.');
+    }
+    if (events & EVENT_LOOT) {
+      audio.loot();
+      state.message = `Loot +$${state.lootValue} pocketed!`;
+      state.messageTime = state.time;
+    }
     if (events & EVENT_COIN) {
       audio.coinLand();
     }
     if (events & EVENT_CAUGHT) {
       audio.caught();
-      screen = SCREEN_CAUGHT;
-      announce('Caught! Press R to try the gallery again.');
+      strikes -= 1;
+      state.strikes = strikes;
+      if (strikes <= 0) {
+        screen = SCREEN_FAILED;
+        announce('Heist failed! Three strikes — press R to start over.');
+      } else {
+        screen = SCREEN_CAUGHT;
+        announce(`Caught! ${strikes} ${strikes === 1 ? 'strike' : 'strikes'} left — press R to try the gallery again.`);
+      }
     }
     if (events & EVENT_LEVEL_CLEAR) {
       audio.levelClear();
@@ -170,7 +196,7 @@ function runGame() {
       if (input.consumeAction(ACTION_CONFIRM) || input.consumeClick()) {
         audio.unlock();
         audio.click();
-        startLevel(0);
+        startLevel(0, true);
       }
     } else if (screen === SCREEN_BRIEF) {
       if (input.consumeAction(ACTION_CONFIRM) || input.consumeClick()) {
@@ -193,6 +219,16 @@ function runGame() {
         } else if (input.consumeCoinKey()) {
           const target = { x: state.player.x + Math.cos(state.player.dir) * 120, y: state.player.y + Math.sin(state.player.dir) * 120 };
           if (throwCoin(world, target.x, target.y)) audio.coin();
+        }
+        if (input.consumeAction(ACTION_SMOKE)) {
+          if (throwSmoke(world)) {
+            audio.smoke();
+            state.message = 'Smoke! They cannot see through it.';
+            state.messageTime = state.time;
+          } else {
+            state.message = 'No smoke bombs left.';
+            state.messageTime = state.time;
+          }
         }
         const move = input.moveVector();
         const sneaking = input.sneaking();
@@ -226,10 +262,15 @@ function runGame() {
         audio.click();
         startLevel(world.state.levelIndex);
       }
+    } else if (screen === SCREEN_FAILED) {
+      if (input.consumeAction(ACTION_RESTART) || input.consumeAction(ACTION_CONFIRM)) {
+        audio.click();
+        startLevel(0, true);
+      }
     } else if (screen === SCREEN_WIN) {
       if (input.consumeAction(ACTION_CONFIRM) || input.consumeClick()) {
         audio.click();
-        startLevel(0);
+        startLevel(0, true);
       }
     }
 

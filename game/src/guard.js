@@ -2,7 +2,9 @@
 // turns to look around, and watches a cone in front of it. Seeing the thief fills
 // suspicion; a full meter raises the alarm and the guard chases the last seen spot.
 // A thrown coin or a loud footstep pulls a guard to investigate instead.
-import { GUARD } from './config.js';
+// A smoke cloud blocks sight: a thief inside one, or behind one, cannot be seen.
+// Security cameras sweep a fixed cone from the wall and sound the alarm the same way.
+import { CAMERA, GUARD, SMOKE } from './config.js';
 import { segmentBlocked } from './world.js';
 
 export const GUARD_PATROL = 'patrol';
@@ -51,17 +53,75 @@ function turnToward(guard, targetAngle, turnRate, dt) {
   return Math.abs(diff) < 0.05;
 }
 
+/** True when the segment from (x1,y1) to (x2,y2) passes through a smoke cloud. */
+export function segmentThroughSmoke(x1, y1, x2, y2, smokes) {
+  for (const s of smokes) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq === 0 ? 0 : ((s.x - x1) * dx + (s.y - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const cx = x1 + dx * t;
+    const cy = y1 + dy * t;
+    if (Math.hypot(s.x - cx, s.y - cy) < SMOKE.radius) return true;
+  }
+  return false;
+}
+
 /** True when the thief is inside this guard's cone with a clear line of sight. */
-export function canSee(guard, player, level, time) {
-  const dx = player.x - guard.x;
-  const dy = player.y - guard.y;
-  const dist = Math.hypot(dx, dy);
+export function canSee(guard, player, level, time, smokes = []) {
   const range = guard.state === GUARD_CHASE ? GUARD.viewRange + 30 : GUARD.viewRange;
+  return canSeeFrom(guard.x, guard.y, guard.dir, range, GUARD.viewHalfAngle, player, level, smokes);
+}
+
+/** Cone test from any fixed eye (guard or camera) toward the thief. */
+export function canSeeFrom(x, y, dir, range, halfAngle, player, level, smokes = []) {
+  const dx = player.x - x;
+  const dy = player.y - y;
+  const dist = Math.hypot(dx, dy);
   if (dist > range) return false;
-  if (dist > 30 && Math.abs(angleDiff(Math.atan2(dy, dx), guard.dir)) > GUARD.viewHalfAngle) return false;
-  if (segmentBlocked(guard.x, guard.y, player.x, player.y, level)) return false;
+  if (dist > 30 && Math.abs(angleDiff(Math.atan2(dy, dx), dir)) > halfAngle) return false;
+  if (segmentBlocked(x, y, player.x, player.y, level)) return false;
   if (player.hiddenInPlant) return false;
+  if (smokes.length > 0) {
+    for (const s of smokes) {
+      if (Math.hypot(player.x - s.x, player.y - s.y) < SMOKE.radius) return false;
+    }
+    if (segmentThroughSmoke(x, y, player.x, player.y, smokes)) return false;
+  }
   return true;
+}
+
+export function createCamera(def, index) {
+  return {
+    id: index,
+    x: def.x,
+    y: def.y,
+    base: def.base,
+    sweep: def.sweep,
+    period: def.period,
+    phase: def.phase || 0,
+    range: def.range || CAMERA.viewRange,
+    dir: def.base,
+    suspicion: 0,
+  };
+}
+
+/**
+ * Advance one camera: sweep its cone, watch the thief. Returns 'alarmed' the
+ * moment its suspicion fills, else null.
+ */
+export function stepCamera(camera, state, dt) {
+  camera.dir = camera.base + Math.sin((state.time * Math.PI * 2) / camera.period + camera.phase) * camera.sweep;
+  const sees = canSeeFrom(camera.x, camera.y, camera.dir, camera.range, CAMERA.viewHalfAngle, state.player, state.level, state.smokes);
+  if (sees) {
+    const before = camera.suspicion;
+    camera.suspicion = Math.min(100, before + CAMERA.suspectRise * dt);
+    if (camera.suspicion >= 100 && before < 100) return 'alarmed';
+  } else {
+    camera.suspicion = Math.max(0, camera.suspicion - CAMERA.suspectFall * dt);
+  }
+  return null;
 }
 
 function moveToward(guard, tx, ty, speed, dt, level) {
@@ -84,9 +144,9 @@ function moveToward(guard, tx, ty, speed, dt, level) {
  * `world` carries level, player, time, and callbacks onNoise/onSpotted.
  */
 export function stepGuard(guard, world, dt) {
-  const { level, player, time } = world;
+  const { level, player, time, smokes } = world;
   guard.moving = false;
-  const sees = canSee(guard, player, level, time);
+  const sees = canSee(guard, player, level, time, smokes || []);
   let event = null;
 
   if (sees) {

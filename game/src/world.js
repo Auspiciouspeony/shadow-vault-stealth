@@ -1,7 +1,9 @@
 // The world: level state, collision, line of sight, pickups, coins, the exit,
 // and the fixed-step update that ties the player and the guards together.
-import { COIN, GUARD, LEVELS, PLAYER, STEP, WORLD_HEIGHT, WORLD_WIDTH } from './config.js';
-import { alertGuardTo, createGuard, stepGuard } from './guard.js';
+// Heists 4 and 5 add security cameras that sweep the room and laser tripwires
+// that blink on a timer; a smoke bomb (Q) hides the thief from every eye.
+import { CAMERA, COIN, GUARD, LASER, LEVELS, LOOT_VALUE, MAX_STRIKES, PLAYER, SMOKE, STEP, WORLD_HEIGHT, WORLD_WIDTH } from './config.js';
+import { alertGuardTo, createCamera, createGuard, stepCamera, stepGuard } from './guard.js';
 
 export const EVENT_NONE = 0;
 export const EVENT_PICKUP = 1;
@@ -11,6 +13,9 @@ export const EVENT_CAUGHT = 8;
 export const EVENT_LEVEL_CLEAR = 16;
 export const EVENT_COIN = 32;
 export const EVENT_NOISE = 64;
+export const EVENT_LASER = 128;
+export const EVENT_LOOT = 256;
+export const EVENT_SMOKE = 512;
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_BRIEF = 'brief';
@@ -18,7 +23,19 @@ export const SCREEN_PLAY = 'play';
 export const SCREEN_PAUSED = 'paused';
 export const SCREEN_LEVEL_DONE = 'level-done';
 export const SCREEN_CAUGHT = 'caught';
+export const SCREEN_FAILED = 'failed';
 export const SCREEN_WIN = 'win';
+
+/** True while this laser's beam is lit at `time`. */
+export function laserIsOn(laser, time) {
+  return ((time + laser.offset) % laser.period) / laser.period < laser.onFrac;
+}
+
+/** True when the thief stands in a lamp's light (and is not hidden in plants). */
+export function playerInLight(state) {
+  if (state.player.hiddenInPlant) return false;
+  return state.level.lamps.some((lamp) => Math.hypot(state.player.x - lamp.x, state.player.y - lamp.y) < 115);
+}
 
 function rectsOf(level) {
   return [...level.walls, ...level.covers];
@@ -97,12 +114,19 @@ export function createWorld(levelIndex, random) {
       sneaking: false,
       moving: false,
       coins: PLAYER.coinsPerLevel,
+      smoke: PLAYER.smokePerLevel,
       hiddenInPlant: false,
       stepAcc: 0,
     },
     guards: level.guards.map((g, i) => createGuard(g, i)),
+    cameras: level.cameras.map((c, i) => createCamera(c, i)),
+    lasers: level.lasers.map((l) => ({ ...l })),
+    loot: level.loot.map((l) => ({ ...l, taken: false })),
+    lootValue: 0,
+    strikes: MAX_STRIKES,
     relics: level.relics.map((r) => ({ ...r, taken: false })),
     coins: [],
+    smokes: [],
     collected: 0,
     score: 0,
     spotted: false,
@@ -128,8 +152,14 @@ function resetWorld(state) {
   state.player.sneaking = false;
   state.player.moving = false;
   state.player.coins = PLAYER.coinsPerLevel;
+  state.player.smoke = PLAYER.smokePerLevel;
   state.player.hiddenInPlant = false;
   state.guards = level.guards.map((g, i) => createGuard(g, i));
+  state.cameras = level.cameras.map((c, i) => createCamera(c, i));
+  state.lasers = level.lasers.map((l) => ({ ...l }));
+  state.loot = level.loot.map((l) => ({ ...l, taken: false }));
+  state.lootValue = 0;
+  state.smokes = [];
   state.relics = level.relics.map((r) => ({ ...r, taken: false }));
   state.coins = [];
   state.collected = 0;
@@ -154,6 +184,73 @@ export function throwCoin(world, tx, ty) {
   p.coins -= 1;
   state.coins.push({ x: tx, y: ty, radius: COIN.radius, landed: false, age: 0 });
   return true;
+}
+
+/** Throw a smoke bomb a short way ahead of the thief. Returns true when thrown. */
+export function throwSmoke(world) {
+  const { state } = world;
+  const p = state.player;
+  if (p.smoke <= 0) return false;
+  p.smoke -= 1;
+  state.smokes.push({
+    x: p.x + Math.cos(p.dir) * PLAYER.smokeRange * 0.5,
+    y: p.y + Math.sin(p.dir) * PLAYER.smokeRange * 0.5,
+    age: 0,
+  });
+  return true;
+}
+
+function updateSmokes(world, dt) {
+  const { state } = world;
+  for (const s of state.smokes) s.age += dt;
+  state.smokes = state.smokes.filter((s) => s.age < SMOKE.life);
+}
+
+function updateCameras(world, dt) {
+  const { state } = world;
+  let events = EVENT_NONE;
+  for (const camera of state.cameras) {
+    if (stepCamera(camera, state, dt) === 'alarmed') {
+      // A camera's alarm pulls every guard to the thief's last seen spot.
+      state.spotted = true;
+      state.alarmed = true;
+      state.alarmTime = state.time;
+      for (const guard of state.guards) {
+        guard.state = 'chase';
+        guard.lastSeen = { x: state.player.x, y: state.player.y };
+        guard.lastSeenTime = state.time;
+        guard.searchTime = 0;
+      }
+      events |= EVENT_ALARM;
+    }
+  }
+  return events;
+}
+
+function distToSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq === 0 ? 0 : ((px - x1) * dx + (py - y1) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + dx * t), py - (y1 + dy * t));
+}
+
+function updateLasers(world) {
+  const { state } = world;
+  let events = EVENT_NONE;
+  for (const laser of state.lasers) {
+    if (!laserIsOn(laser, state.time)) continue;
+    if (state.time - laser.lastTrip < LASER.tripCooldown) continue;
+    if (distToSegment(state.player.x, state.player.y, laser.x1, laser.y1, laser.x2, laser.y2) < LASER.tripRadius) {
+      laser.lastTrip = state.time;
+      for (const guard of state.guards) {
+        if (guard.state === 'patrol') alertGuardTo(guard, { x: state.player.x, y: state.player.y }, world);
+      }
+      events |= EVENT_LASER;
+    }
+  }
+  return events;
 }
 
 function updateCoins(world, dt) {
@@ -215,6 +312,9 @@ export function stepWorld(world, move, sneaking, dt = STEP) {
 
   events |= updatePlayer(world, move, sneaking, dt);
   updateCoins(world, dt);
+  updateSmokes(world, dt);
+  events |= updateCameras(world, dt);
+  events |= updateLasers(world);
 
   for (const guard of state.guards) {
     const e = stepGuard(guard, state, dt);
@@ -247,6 +347,16 @@ export function stepWorld(world, move, sneaking, dt = STEP) {
     }
   }
 
+  // Pocket a gold pile: quiet money on top of the relics.
+  for (const pile of state.loot) {
+    if (!pile.taken && Math.hypot(pile.x - state.player.x, pile.y - state.player.y) < 26) {
+      pile.taken = true;
+      state.lootValue += pile.value;
+      state.score += pile.value;
+      events |= EVENT_LOOT;
+    }
+  }
+
   // The exit opens once every relic is taken.
   const exit = state.level.exit;
   const allTaken = state.collected === state.relics.length;
@@ -264,5 +374,7 @@ export function levelComplete(state) {
 }
 
 export function heatLevel(state) {
-  return Math.max(0, ...state.guards.map((g) => g.suspicion));
+  const guardHeat = Math.max(0, ...state.guards.map((g) => g.suspicion));
+  const cameraHeat = Math.max(0, ...state.cameras.map((c) => c.suspicion));
+  return Math.max(guardHeat, cameraHeat);
 }

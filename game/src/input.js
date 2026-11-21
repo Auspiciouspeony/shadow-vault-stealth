@@ -1,10 +1,11 @@
 // Keyboard + mouse input. WASD/arrows move, Shift sneaks, Space or click tosses a
-// coin, E interacts, P pauses, M mutes, Enter/Space confirms on menus.
+// coin, Q throws a smoke bomb, E interacts, P pauses, M mutes, Enter/Space confirms on menus.
 export const ACTION_CONFIRM = 'confirm';
 export const ACTION_PAUSE = 'pause';
 export const ACTION_MUTE = 'mute';
 export const ACTION_RESTART = 'restart';
 export const ACTION_COIN = 'coin';
+export const ACTION_SMOKE = 'smoke';
 
 const KEY_ACTIONS = {
   Enter: ACTION_CONFIRM,
@@ -16,6 +17,8 @@ const KEY_ACTIONS = {
   M: ACTION_MUTE,
   r: ACTION_RESTART,
   R: ACTION_RESTART,
+  q: ACTION_SMOKE,
+  Q: ACTION_SMOKE,
 };
 
 export function createInput(canvas) {

@@ -84,6 +84,16 @@ export function createAudio() {
       tone(1900, 0.09, 'sine', 0.08);
       tone(2500, 0.14, 'sine', 0.06, 0.07);
     },
+    smoke() {
+      noiseBurst(0.5, 0.1, 800);
+    },
+    laser() {
+      tone(1400, 0.18, 'square', 0.06, 0, 300);
+    },
+    loot() {
+      tone(1320, 0.08, 'sine', 0.07);
+      tone(1760, 0.12, 'sine', 0.06, 0.06);
+    },
     coinLand() {
       noiseBurst(0.08, 0.12, 3000);
       tone(1300, 0.1, 'sine', 0.05, 0.02);

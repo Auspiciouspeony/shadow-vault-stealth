@@ -1,9 +1,16 @@
 // Canvas painting: the moonlit floor, walls and cover, vision cones, guards,
-// the thief, relics, the exit, the HUD and every menu screen.
-import { GUARD, WORLD_HEIGHT, WORLD_WIDTH } from './config.js';
-import { SCREEN_BRIEF, SCREEN_CAUGHT, SCREEN_LEVEL_DONE, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN, heatLevel } from './world.js';
+// cameras and lasers, the thief, relics, loot, the exit, the HUD and every menu screen.
+import { CAMERA, GUARD, LASER, LEVELS, SMOKE, WORLD_HEIGHT, WORLD_WIDTH } from './config.js';
+import { SCREEN_BRIEF, SCREEN_CAUGHT, SCREEN_FAILED, SCREEN_LEVEL_DONE, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN, heatLevel, laserIsOn, playerInLight } from './world.js';
 
 const TILE = 64;
+const RUG_TINTS = [
+  'rgba(122, 44, 66, 0.22)',
+  'rgba(44, 90, 122, 0.22)',
+  'rgba(90, 44, 122, 0.20)',
+  'rgba(122, 90, 30, 0.24)',
+  'rgba(30, 110, 90, 0.22)',
+];
 
 export function createRenderer(canvas) {
   const ctx = canvas.getContext('2d');
@@ -33,21 +40,55 @@ export function createRenderer(canvas) {
     for (let ty = 0; ty < WORLD_HEIGHT / TILE; ty += 1) {
       for (let tx = 0; tx < WORLD_WIDTH / TILE; tx += 1) {
         const even = (tx + ty) % 2 === 0;
-        ctx.fillStyle = even ? '#232a3d' : '#1d2334';
+        ctx.fillStyle = even ? '#1f2537' : '#191e2e';
         ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(tx * TILE + 0.5, ty * TILE + 0.5, TILE, TILE);
       }
     }
     const glow = ctx.createRadialGradient(640, 360, 60, 640, 360, 620);
     glow.addColorStop(0, 'rgba(150, 180, 255, 0.10)');
-    glow.addColorStop(1, 'rgba(0, 0, 0, 0.35)');
+    glow.addColorStop(1, 'rgba(0, 0, 0, 0.42)');
     ctx.fillStyle = glow;
     ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    // Rug runners down the middle of each gallery.
-    ctx.fillStyle = 'rgba(122, 44, 66, 0.22)';
+    // Dust motes drifting in the moonlight.
+    for (let i = 0; i < 36; i += 1) {
+      const mx = ((i * 197.3) % WORLD_WIDTH) + Math.sin(state.time * 0.2 + i * 1.7) * 8;
+      const my = ((i * 311.7) % WORLD_HEIGHT) + Math.cos(state.time * 0.15 + i * 2.3) * 6;
+      ctx.fillStyle = `rgba(200, 220, 255, ${0.05 + (i % 3) * 0.03})`;
+      ctx.beginPath();
+      ctx.arc(mx, my, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Rug runner down the middle, tinted per heist.
+    ctx.fillStyle = RUG_TINTS[state.levelIndex % RUG_TINTS.length];
     ctx.fillRect(120, 300, 1040, 120);
     ctx.strokeStyle = 'rgba(220, 170, 90, 0.35)';
     ctx.lineWidth = 3;
     ctx.strokeRect(126, 306, 1028, 108);
+  }
+
+  function drawLamps(state) {
+    for (const lamp of state.level.lamps) {
+      const glow = ctx.createRadialGradient(lamp.x, lamp.y, 4, lamp.x, lamp.y, 130);
+      glow.addColorStop(0, 'rgba(255, 190, 90, 0.16)');
+      glow.addColorStop(1, 'rgba(255, 190, 90, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(lamp.x, lamp.y, 130, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#2c2c34';
+      ctx.fillRect(lamp.x - 3, lamp.y - 3, 6, 6);
+      ctx.fillStyle = '#ffd76a';
+      ctx.beginPath();
+      ctx.arc(lamp.x, lamp.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255, 215, 106, 0.35)';
+      ctx.beginPath();
+      ctx.arc(lamp.x, lamp.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   function drawWalls(level) {
@@ -179,6 +220,149 @@ export function createRenderer(canvas) {
       ctx.arc(guard.x, guard.y, GUARD.radius + 7, -Math.PI / 2, -Math.PI / 2 + (guard.suspicion / 100) * Math.PI * 2);
       ctx.stroke();
     }
+    // Investigating guards mutter what they heard.
+    if (guard.state === 'investigate') {
+      ctx.fillStyle = '#ffe9a8';
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText('WHAT WAS THAT?', guard.x, guard.y - 44);
+    }
+  }
+
+  function drawCameraCone(camera) {
+    const hot = camera.suspicion > 55;
+    const warm = camera.suspicion > 25;
+    const color = hot ? '255, 70, 60' : warm ? '255, 150, 60' : '255, 90, 80';
+    const grad = ctx.createRadialGradient(camera.x, camera.y, 8, camera.x, camera.y, camera.range);
+    grad.addColorStop(0, `rgba(${color}, 0.30)`);
+    grad.addColorStop(1, `rgba(${color}, 0.02)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(camera.x, camera.y);
+    ctx.arc(camera.x, camera.y, camera.range, camera.dir - CAMERA.viewHalfAngle, camera.dir + CAMERA.viewHalfAngle);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = `rgba(${color}, 0.45)`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  function drawCamera(camera) {
+    // Wall-mounted eye: dark housing, red lens toward its sweep.
+    ctx.fillStyle = '#232733';
+    ctx.fillRect(camera.x - 10, camera.y - 7, 20, 14);
+    ctx.strokeStyle = '#0e1220';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(camera.x - 10, camera.y - 7, 20, 14);
+    ctx.fillStyle = camera.suspicion > 55 ? '#ff463c' : '#ff6b5e';
+    ctx.beginPath();
+    ctx.arc(camera.x + Math.cos(camera.dir) * 8, camera.y + Math.sin(camera.dir) * 8, 4, 0, Math.PI * 2);
+    ctx.fill();
+    if (camera.suspicion > 25) {
+      ctx.fillStyle = '#ff463c';
+      ctx.beginPath();
+      ctx.arc(camera.x, camera.y - 22, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#14100a';
+      ctx.font = 'bold 13px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('!', camera.x, camera.y - 21);
+    }
+    if (camera.suspicion > 2 && camera.suspicion < 100) {
+      ctx.strokeStyle = 'rgba(255, 70, 60, 0.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(camera.x, camera.y, CAMERA.radius + 6, -Math.PI / 2, -Math.PI / 2 + (camera.suspicion / 100) * Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function drawLasers(state) {
+    for (const laser of state.lasers) {
+      const on = laserIsOn(laser, state.time);
+      // Emitter posts at both ends.
+      for (const [ex, ey] of [[laser.x1, laser.y1], [laser.x2, laser.y2]]) {
+        ctx.fillStyle = '#3a2026';
+        ctx.fillRect(ex - 5, ey - 5, 10, 10);
+        ctx.fillStyle = on ? '#ff2e3e' : '#7a3a42';
+        ctx.beginPath();
+        ctx.arc(ex, ey, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (on) {
+        ctx.strokeStyle = 'rgba(255, 46, 62, 0.25)';
+        ctx.lineWidth = 7;
+        ctx.beginPath();
+        ctx.moveTo(laser.x1, laser.y1);
+        ctx.lineTo(laser.x2, laser.y2);
+        ctx.stroke();
+        ctx.strokeStyle = '#ff2e3e';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(laser.x1, laser.y1);
+        ctx.lineTo(laser.x2, laser.y2);
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = 'rgba(255, 46, 62, 0.25)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 8]);
+        ctx.beginPath();
+        ctx.moveTo(laser.x1, laser.y1);
+        ctx.lineTo(laser.x2, laser.y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  function drawSmoke(state) {
+    for (const s of state.smokes) {
+      const fade = s.age > SMOKE.life - 1.5 ? (SMOKE.life - s.age) / 1.5 : 1;
+      for (let i = 0; i < 3; i += 1) {
+        const wob = Math.sin(state.time * 2 + i * 2.1 + s.x) * 6;
+        ctx.fillStyle = `rgba(205, 205, 215, ${0.30 * fade})`;
+        ctx.beginPath();
+        ctx.arc(s.x + (i - 1) * 26 + wob, s.y + ((i % 2) * 14 - 7), SMOKE.radius * 0.55, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.strokeStyle = `rgba(220, 220, 230, ${0.35 * fade})`;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, SMOKE.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  function drawLoot(state) {
+    for (const pile of state.loot) {
+      if (pile.taken) continue;
+      const pulse = 0.6 + Math.sin(state.time * 3 + pile.x) * 0.25;
+      const glow = ctx.createRadialGradient(pile.x, pile.y, 2, pile.x, pile.y, 30);
+      glow.addColorStop(0, `rgba(255, 215, 106, ${0.4 * pulse})`);
+      glow.addColorStop(1, 'rgba(255, 215, 106, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(pile.x, pile.y, 30, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#d9a441';
+      for (const [ox, oy] of [[-7, 4], [6, 5], [0, -5]]) {
+        ctx.beginPath();
+        ctx.arc(pile.x + ox, pile.y + oy, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#8a6a1f';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#ffe9a8';
+      ctx.font = 'bold 11px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText('$100', pile.x, pile.y - 16);
+    }
   }
 
   function drawPlayer(player, time) {
@@ -207,6 +391,13 @@ export function createRenderer(canvas) {
       ctx.arc(player.x, player.y, 18, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+    if (player.hiddenInPlant) {
+      ctx.fillStyle = '#7ee787';
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText('HIDDEN', player.x, player.y + 30);
     }
   }
 
@@ -281,47 +472,84 @@ export function createRenderer(canvas) {
 
   function drawHud(state, screen) {
     const heat = heatLevel(state);
-    // Top bar.
-    ctx.fillStyle = 'rgba(8, 10, 18, 0.82)';
-    ctx.fillRect(0, 0, WORLD_WIDTH, 46);
+    const inLight = playerInLight(state);
+    const hidden = state.player.hiddenInPlant;
+    const detection = heat > 55 ? 'SEEN!' : heat > 25 ? 'SUSPICIOUS' : hidden ? 'HIDDEN' : inLight ? 'IN LIGHT' : 'UNSEEN';
+    const detectionColor = heat > 55 ? '#ff463c' : heat > 25 ? '#ffc93c' : hidden ? '#7ee787' : inLight ? '#ffb45e' : '#7ee787';
+    // Top bar, row 1: title, heist pips, strikes, detection badge.
+    ctx.fillStyle = 'rgba(8, 10, 18, 0.88)';
+    ctx.fillRect(0, 0, WORLD_WIDTH, 72);
     ctx.fillStyle = '#f5e9c9';
     ctx.font = 'bold 17px system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`SHADOW VAULT — ${state.level.name}`, 16, 24);
-    // Relic pips.
-    state.relics.forEach((r, i) => {
-      const x = 470 + i * 30;
-      ctx.fillStyle = r.taken ? '#ff5d73' : 'rgba(245,233,201,0.25)';
+    const title = `SHADOW VAULT — ${state.level.name}`;
+    ctx.fillText(title, 16, 23);
+    const titleW = ctx.measureText(title).width;
+    // Heist pips: five diamonds, filled up to this heist.
+    for (let i = 0; i < LEVELS.length; i += 1) {
+      const x = 16 + titleW + 26 + i * 20;
+      ctx.fillStyle = i <= state.levelIndex ? '#ffd76a' : 'rgba(245,233,201,0.25)';
       ctx.beginPath();
       ctx.moveTo(x, 14);
-      ctx.lineTo(x + 8, 24);
-      ctx.lineTo(x, 34);
-      ctx.lineTo(x - 8, 24);
+      ctx.lineTo(x + 7, 23);
+      ctx.lineTo(x, 32);
+      ctx.lineTo(x - 7, 23);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = '#b9c2d8';
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillText(`HEIST ${state.levelIndex + 1}/${LEVELS.length}`, 16 + titleW + 26 + LEVELS.length * 20 + 6, 23);
+    // Strikes: three dots, lost ones dimmed.
+    ctx.fillStyle = '#b9c2d8';
+    ctx.fillText('STRIKES', 1010, 23);
+    for (let i = 0; i < 3; i += 1) {
+      ctx.fillStyle = i < state.strikes ? '#ff6b5e' : 'rgba(245,233,201,0.22)';
+      ctx.beginPath();
+      ctx.arc(1085 + i * 20, 23, 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Detection badge + alarm meter.
+    ctx.fillStyle = detectionColor;
+    ctx.fillRect(1140, 7, 124, 30);
+    ctx.fillStyle = '#14100a';
+    ctx.font = 'bold 15px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(detection, 1202, 23);
+    ctx.fillStyle = 'rgba(245,233,201,0.2)';
+    ctx.fillRect(1140, 40, 124, 4);
+    ctx.fillStyle = detectionColor;
+    ctx.fillRect(1140, 40, 124 * Math.min(1, heat / 100), 4);
+    // Row 2: relics, coins, smoke, loot, time, score, ghost.
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#f5e9c9';
+    ctx.font = '600 15px system-ui, sans-serif';
+    state.relics.forEach((r, i) => {
+      const x = 24 + i * 26;
+      ctx.fillStyle = r.taken ? '#ff5d73' : 'rgba(245,233,201,0.25)';
+      ctx.beginPath();
+      ctx.moveTo(x, 50);
+      ctx.lineTo(x + 8, 60);
+      ctx.lineTo(x, 70);
+      ctx.lineTo(x - 8, 60);
       ctx.closePath();
       ctx.fill();
     });
     ctx.fillStyle = '#f5e9c9';
-    ctx.font = '600 15px system-ui, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(`Relics ${state.collected}/${state.relics.length}`, 560, 24);
-    ctx.fillText(`Coins ${state.player.coins}`, 700, 24);
+    ctx.fillText(`Relics ${state.collected}/${state.relics.length}`, 110, 60);
+    ctx.fillText(`Coins ${state.player.coins}`, 250, 60);
+    ctx.fillText(`Smoke ${state.player.smoke}`, 350, 60);
+    ctx.fillText(`Loot $${state.lootValue}`, 460, 60);
     const mins = Math.floor(state.levelTime / 60);
     const secs = Math.floor(state.levelTime % 60).toString().padStart(2, '0');
-    ctx.fillText(`${mins}:${secs}`, 800, 24);
-    ctx.fillText(`Score ${state.score}`, 880, 24);
-    // Heat eye.
-    ctx.fillStyle = heat > 55 ? '#ff463c' : heat > 25 ? '#ffc93c' : '#7ee787';
-    ctx.beginPath();
-    ctx.arc(1100, 23, 10, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#14100a';
-    ctx.beginPath();
-    ctx.arc(1100, 23, 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#f5e9c9';
-    ctx.font = '600 14px system-ui, sans-serif';
-    ctx.fillText(heat > 55 ? 'SEEN!' : heat > 25 ? 'Suspicious' : 'Hidden', 1120, 24);
+    ctx.fillText(`${mins}:${secs}`, 590, 60);
+    ctx.fillText(`Score ${state.score}`, 680, 60);
+    ctx.fillText(`Best ${state.best}`, 810, 60);
+    ctx.fillStyle = state.spotted ? '#ff6b5e' : '#7ee787';
+    ctx.textAlign = 'right';
+    ctx.fillText(state.spotted ? 'SPOTTED — ghost bonus lost' : 'GHOST +1000 if unseen', 1264, 60);
+    ctx.textAlign = 'left';
     // Heat vignette when the guards are on to you.
     if (heat > 25) {
       const a = Math.min(0.3, (heat / 100) * 0.35);
@@ -335,13 +563,13 @@ export function createRenderer(canvas) {
       ctx.fillStyle = 'rgba(245,233,201,0.75)';
       ctx.font = '13px system-ui, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('WASD / arrows move · Shift sneak · click tosses a coin · collect every relic, then reach the EXIT', 640, 706);
+      ctx.fillText('WASD / arrows move · Shift sneak · click / Space coin · Q smoke · collect relics + loot, then reach the EXIT', 640, 706);
     }
     if (state.message) {
       ctx.fillStyle = '#ffe9a8';
       ctx.font = 'bold 18px system-ui, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(state.message, 640, 84);
+      ctx.fillText(state.message, 640, 100);
     }
   }
 
@@ -377,7 +605,7 @@ export function createRenderer(canvas) {
       ctx.fillText('SHADOW VAULT', 640, 250);
       ctx.fillStyle = '#e8ecf5';
       ctx.font = '21px system-ui, sans-serif';
-      ctx.fillText('A top-down stealth heist in three moonlit galleries', 640, 295);
+      ctx.fillText('A top-down stealth heist across five moonlit galleries', 640, 295);
       ctx.font = '17px system-ui, sans-serif';
       ctx.fillText('Slip past the night wardens. Take every relic. Reach the exit unseen.', 640, 330);
       ctx.fillStyle = '#ffd76a';
@@ -385,36 +613,48 @@ export function createRenderer(canvas) {
       ctx.fillText('Press Enter or click to begin', 640, 420);
       ctx.fillStyle = '#b9c2d8';
       ctx.font = '15px system-ui, sans-serif';
-      ctx.fillText('WASD / arrows — move    Shift — sneak    Click — toss a coin to distract', 640, 470);
-      ctx.fillText('Stay out of the yellow cones. Green plants hide you while you sneak.', 640, 496);
+      ctx.fillText('WASD / arrows — move    Shift — sneak    Click — toss a coin to distract    Q — smoke bomb', 640, 470);
+      ctx.fillText('Stay out of the yellow cones. Cameras sweep the casino; lasers guard the Sky Palace.', 640, 496);
+      ctx.fillText('Green plants hide you while you sneak. Three strikes and the heist fails.', 640, 522);
       if (state.best > 0) {
         ctx.fillStyle = '#7ee787';
-        ctx.fillText(`Best score: ${state.best}`, 640, 540);
+        ctx.fillText(`Best score: ${state.best}`, 640, 566);
       }
     } else if (screen === SCREEN_BRIEF) {
-      panel(state.level.name, [
+      const lines = [
         `Relics to steal: ${state.relics.map((r) => r.name).join(', ')}`,
-        `${state.guards.length} wardens patrol this gallery. Their cones are their eyes.`,
-        'Press Enter to slip in.',
-      ], '#ffd76a');
+        `${state.guards.length} wardens patrol this heist. Their cones are their eyes.`,
+      ];
+      if (state.cameras.length > 0) lines.push(`${state.cameras.length} security cameras sweep the room — break their line of sight.`);
+      if (state.lasers.length > 0) lines.push(`${state.lasers.length} laser tripwires blink on and off — cross while they are dark.`);
+      lines.push(`Gold piles worth $${state.loot.reduce((sum, p) => sum + p.value, 0)} are yours for the taking.`);
+      lines.push('Press Enter to slip in.');
+      panel(state.level.name, lines, '#ffd76a');
     } else if (screen === SCREEN_PAUSED) {
-      panel('Paused', ['Take a breath. The wardens wait.', 'P resume · R restart the gallery · M mute'], '#b9c2d8');
+      panel('Paused', ['Take a breath. The wardens wait.', 'P resume · R restart the heist · M mute'], '#b9c2d8');
     } else if (screen === SCREEN_LEVEL_DONE) {
-      panel('Gallery Cleared!', [
-        `All relics taken. Score ${state.score}.`,
+      panel('Heist Cleared!', [
+        `All relics taken. Score ${state.score}. Loot $${state.lootValue} pocketed.`,
         state.spotted ? 'You were spotted — no ghost bonus this time.' : 'Ghost bonus +1000: never spotted!',
-        'Press Enter for the next gallery.',
+        'Press Enter for the next heist.',
       ], '#3cdc78');
     } else if (screen === SCREEN_CAUGHT) {
       panel('Caught!', [
         'A warden laid hands on you in the dark.',
+        `Strikes left: ${state.strikes} — three strikes ends the heist.`,
         `Score ${state.score} · Relics ${state.collected}/${state.relics.length}`,
-        'Press R to try the gallery again.',
+        'Press R to try the heist again.',
+      ], '#ff463c');
+    } else if (screen === SCREEN_FAILED) {
+      panel('Heist Failed!', [
+        'Three strikes — the vault keeps its secrets tonight.',
+        `Score ${state.score} · Loot $${state.lootValue} pocketed.`,
+        'Press R to start the whole heist over.',
       ], '#ff463c');
     } else if (screen === SCREEN_WIN) {
       panel('The Vault Is Yours!', [
-        'Every relic, every gallery — and no alarm that stuck.',
-        `Final score ${state.score}. Best ${Math.max(state.best, state.score)}.`,
+        'Every relic, every heist — five galleries, and no alarm that stuck.',
+        `Final score ${state.score}. Loot $${state.lootValue}. Best ${Math.max(state.best, state.score)}.`,
         'Press Enter to play again.',
       ], '#ffd76a');
     }
@@ -429,15 +669,21 @@ export function createRenderer(canvas) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.setTransform(t.scale, 0, 0, t.scale, t.ox, t.oy);
       drawFloor(state);
+      drawLamps(state);
       // Cones first so walls and cover hide the parts behind them.
       for (const guard of state.guards) drawCone(guard);
+      for (const camera of state.cameras) drawCameraCone(camera);
       drawWalls(state.level);
       drawCover(state.level);
+      drawLasers(state);
       drawExit(state);
+      drawLoot(state);
       for (const relic of state.relics) drawRelic(relic, state.time);
       drawCoins(state);
       for (const guard of state.guards) drawGuard(guard);
+      for (const camera of state.cameras) drawCamera(camera);
       drawPlayer(state.player, state.time);
+      drawSmoke(state);
       drawHud(state, screen);
       if (screen !== SCREEN_PLAY) drawScreen(state, screen);
     },
